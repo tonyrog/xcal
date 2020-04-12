@@ -6,19 +6,22 @@
 %%% @end
 %%% Created : 11 Apr 2020 by Tony Rogvall <tony@rogvall.se>
 
--module(sunset_sunrise).
+-module(xcal_sun).
 
--export([get_time/0]).
--export([get_time/1]).
--export([get_time/4]).
+-export([get_rise_set/0]).
+-export([get_rise_set/1]).
+-export([get_rise_set/4]).
+-export([get_location/0]).
+-export([get_timezone/0]).
 -export([benchmark/0]).
 -export([test/0, test/5]).
 
 -compile(inline).
 -compile({inline_size,100}).
 
-
--define(SECONDS_PER_DAY, (24*60*60)).
+-define(APP, xcal).
+-define(SECONDS_PER_HOUR, 3600).
+-define(SECONDS_PER_DAY, (24*?SECONDS_PER_HOUR)).
 
 -type radians() :: float().
 -type degree() :: float().
@@ -49,18 +52,18 @@ sqr(X) -> X*X.
 %% Sunrise and Sunset times.
 %% If some parameter is wrong it will return an error.
 
-get_time() ->
-    get_time(date()).
+get_rise_set() ->
+    get_rise_set(date()).
     
-get_time(Date) ->
-    {Latitude,Longitude,UtcOffset} = eplanet:location(),
-    get_time(Latitude,Longitude,UtcOffset,Date).
+get_rise_set(Date) ->
+    {Latitude,Longitude,UtcOffset} = get_location(),
+    get_rise_set(Latitude,Longitude,UtcOffset,Date).
 
--spec get_time(Latitude::number(), Longitude::number(), UtcOffset::number(), Date::calendar:date()) ->
+-spec get_rise_set(Latitude::number(), Longitude::number(), UtcOffset::number(), Date::calendar:date()) ->
 		      {error, Message::string()} | 
 		      {ok, {Sunrise::calendar:time(),Sunset::calendar:time()}}.
 
-get_time(Latitude, Longitude, UtcOffset, Date={Year,_Month,_Day}) when
+get_rise_set(Latitude, Longitude, UtcOffset, Date={Year,_Month,_Day}) when
       (Latitude >= -90),(Latitude =< 90),
       (Longitude >= -180), (Longitude =< 180),
       (UtcOffset >= -12), (UtcOffset =< 14),
@@ -68,26 +71,59 @@ get_time(Latitude, Longitude, UtcOffset, Date={Year,_Month,_Day}) when
     case calendar:valid_date(Date) of
 	false -> {error, invalid_date};
 	true ->
-	    get_time_(Latitude, Longitude, UtcOffset, Date)
+	    get_rise_set_(Latitude, Longitude, UtcOffset, Date)
     end.
 
 %% I guess second accuracy is a bit over kill just to find
 %% out when sun is settings, bit who knows?
-get_time_(Latitude, Longitude, UtcOffset, Date) ->
+get_rise_set_(Latitude, Longitude, UtcOffset, Date) ->
     NumDays = days_diff({1899,12,30}, Date),
     {SunriseSeconds,SunsetSeconds} = 
-	get_time__(Latitude, Longitude, UtcOffset, NumDays,
+	get_rise_set__(Latitude, Longitude, UtcOffset, NumDays,
 		   0, ?SECONDS_PER_DAY, 
 		   0, ?SECONDS_PER_DAY, 0, ?SECONDS_PER_DAY),
     Sunrise = calendar:seconds_to_time(SunriseSeconds),
     Sunset = calendar:seconds_to_time(SunsetSeconds),
     {ok,{Sunrise, Sunset}}.
 
-get_time__(Latitude, Longitude, UtcOffset, NumDays, 
+get_rise_set__(Latitude, Longitude, UtcOffset, NumDays, 
 	   Second, SecondMax,
 	   Sunrise, SunriseMin,
 	   Sunset, SunsetMin) when Second < SecondMax ->
     SecondNorm = Second / (?SECONDS_PER_DAY-1),
+    case get_solar_noon(Latitude,Longitude,UtcOffset,NumDays,SecondNorm) of
+	{_SolarNoon,undefined} ->
+	    get_rise_set__(Latitude, Longitude, UtcOffset, NumDays, 
+			   Second+1, SecondMax,
+			   Sunrise, SunriseMin,
+			   Sunset, SunsetMin);
+	{SolarNoon,SunriseSecond} ->
+	    Second0 = SecondNorm * ?SECONDS_PER_DAY,
+	    Sunrise0   = SolarNoon - SunriseSecond - Second0,
+	    Sunset0    = SolarNoon + SunriseSecond - Second0,
+	    SunriseAbs = abs(Sunrise0),
+	    SunsetAbs  = abs(Sunset0),
+	    {Sunrise1,SunriseMin1} =
+		if SunriseAbs < SunriseMin -> {Second, SunriseAbs};
+		   true -> {Sunrise, SunriseMin}
+		end,
+	    {Sunset1,SunsetMin1} =
+		if SunsetAbs < SunsetMin -> {Second, SunsetAbs};
+		   true -> {Sunset, SunsetMin}
+		end,
+	    get_rise_set__(Latitude, Longitude, UtcOffset, NumDays, 
+			   Second+1, SecondMax,
+			   Sunrise1, SunriseMin1,
+			   Sunset1, SunsetMin1)
+    end;
+get_rise_set__(_Latitude, _Longitude, _UtcOffset, _NumDays, 
+	   Second, Second,
+	   Sunrise, _SunriseMin,
+	   Sunset, _SunsetMin) ->
+    {Sunrise, Sunset}.
+
+
+get_solar_noon(Latitude, Longitude, UtcOffset, NumDays, SecondNorm) ->
     JulianDay = calcJulianDay(NumDays, SecondNorm, UtcOffset),
     JulianCentury = calcJulianCentury(JulianDay),
     GeomMeanLongSun_r = calcGeomMeanLongSun_r(JulianCentury),
@@ -102,32 +138,14 @@ get_time__(Latitude, Longitude, UtcOffset, NumDays,
     MultiFactor = sqr(math:tan(ObliqCorr_r/2.0)),
     EquationOfTime = calcEquationOfTime(MultiFactor, GeomMeanLongSun_r, 
 					EccentEarthOrbit, GeomMeanAnomSun_r),
-    HaSunrise = calcHaSunrise(Latitude, SunDeclination_r),
     SolarNoon = calcSolarNoon(Longitude, EquationOfTime, UtcOffset),
-
-    Second0 = SecondNorm * ?SECONDS_PER_DAY,
-    SunriseSecond = round(HaSunrise*4.0*60.0),
-    Sunrise0   = SolarNoon - SunriseSecond - Second0,
-    Sunset0    = SolarNoon + SunriseSecond - Second0,
-    SunriseAbs = abs(Sunrise0),
-    SunsetAbs  = abs(Sunset0),
-    {Sunrise1,SunriseMin1} =
-	if SunriseAbs < SunriseMin -> {Second, SunriseAbs};
-	   true -> {Sunrise, SunriseMin}
-	end,
-    {Sunset1,SunsetMin1} =
-	if SunsetAbs < SunsetMin -> {Second, SunsetAbs};
-	   true -> {Sunset, SunsetMin}
-	end,
-    get_time__(Latitude, Longitude, UtcOffset, NumDays, 
-	       Second+1, SecondMax,
-	       Sunrise1, SunriseMin1,
-	       Sunset1, SunsetMin1);
-get_time__(_Latitude, _Longitude, _UtcOffset, _NumDays, 
-	   Second, Second,
-	   Sunrise, _SunriseMin,
-	   Sunset, _SunsetMin) ->
-    {Sunrise, Sunset}.
+    case calcHaSunrise(Latitude, SunDeclination_r) of
+	undefined -> 
+	    {SolarNoon,undefined};
+	HaSunrise ->
+	    SunriseSecond = round(HaSunrise*4.0*60.0),
+	    {SolarNoon, SunriseSecond}
+    end.
 
 %%
 %% Calculate Julian Day based on the formula:
@@ -247,7 +265,13 @@ calcEquationOfTime(MultiFactor, GeomMeanLongSun_r,
 calcHaSunrise(Latitude, SunDeclination_r) ->
     Latitude_r = ?deg2rad(Latitude),
     %% SunDeclination_r = ?deg2rad(SunDeclination),
-    ?rad2deg(math:acos(math:cos(?deg2rad(90.833))/(math:cos(Latitude_r)*math:cos(SunDeclination_r)) - math:tan(Latitude_r)*math:tan(SunDeclination_r))).
+    R = math:cos(?deg2rad(90.833))/
+	(math:cos(Latitude_r)*math:cos(SunDeclination_r)),
+    A = R-math:tan(Latitude_r)*math:tan(SunDeclination_r),
+    if A >= 1.0 -> undefined;
+       A =< -1.0 -> undefined;
+       true -> ?rad2deg(math:acos(A))
+    end.
 
 %% Calculate the Solar Noon based on the formula: (720 - 4 * longitude - equationOfTime + utcOffset * 60) * 60
 %% longitude - The longitude is defined by the user
@@ -260,6 +284,166 @@ calcHaSunrise(Latitude, SunDeclination_r) ->
 calcSolarNoon(Longitude, EquationOfTime, UtcOffset) ->
     ((720.0 - 4.0*Longitude - EquationOfTime + UtcOffset*60.0) * 60.0).
 
+%% get current location
+get_location() ->
+    case application:get_env(?APP, location) of
+	undefined ->
+	    get_location_linux();
+	{ok,{Long,Lat}} ->
+	    case application:get_env(?APP, timezone) of
+		undefined -> 
+		    {Long,Lat,0};
+		{ok,Tz} ->
+		    {Long,Lat,Tz}
+	    end
+    end.
+
+get_location_linux() ->
+    Offs = calendar:datetime_to_gregorian_seconds(calendar:local_time()) - 
+	calendar:datetime_to_gregorian_seconds(calendar:universal_time()),
+    case get_timezone() of
+	{ok, TimeZone} ->
+	    case location_from_zone_tab(TimeZone) of
+		{ok,{_CountryCodes,{Latitude,Longitude},_TZ}} ->
+		    {Latitude, Longitude, Offs / ?SECONDS_PER_HOUR}
+	    end
+    end.
+
+%% Get time zone, fixme: use windows "tzutil /g"
+get_timezone() ->
+    case file:read_file("/etc/timezone") of
+	{error, enoent} ->
+	    case file:read_link("/etc/localtime") of
+		{ok,"/usr/share/zoneinfo/"++Zone} ->
+		    {ok,Zone};
+		{error,enoent} ->
+		    {error,enoent};
+		{error,einval} ->
+		    case file:read_file("/etc/localtime") of
+			{ok,ZoneInfo} ->
+			    MD5 = erlang:md5(ZoneInfo),
+			    search_time_zone("/usr/share/zoneinfo", MD5);
+			Error ->
+			    Error
+		    end
+	    end;
+	{ok,BinZone} -> 
+	    {ok,string:trim(binary_to_list(BinZone))}
+    end.
+
+search_time_zone(Dir, MD5) ->
+    try
+	filelib:fold_files(Dir, ".*", true, 
+			   fun(File,Acc) ->
+				   case file:read_file(File) of
+				       {ok,ZoneInfo} ->
+					   case erlang:md5(ZoneInfo) of
+					       MD5 -> throw(File);
+					       _ -> Acc
+					   end;
+				       _ -> Acc
+				   end
+			   end, {error,enoent}) of
+	Error -> Error
+    catch
+	throw:"/usr/share/zoneinfo/"++File ->
+	    {ok,File}
+    end.
+
+location_from_zone_tab(TimeZone) ->
+    case file:open(filename:join(code:priv_dir(?APP),"zone1970.tab"),
+		   [raw,read,binary]) of
+	{ok,Fd} ->
+	    try location_from_zone_fd(Fd,TimeZone) of
+		Zone -> Zone
+	    after
+		file:close(Fd)
+	    end;
+	Error ->
+	    Error
+    end.
+
+location_from_zone_fd(Fd, TimeZone) ->
+    case file:read_line(Fd) of
+	{ok, <<$#,_/binary>>} ->
+	    location_from_zone_fd(Fd, TimeZone);
+	{ok, Data} ->
+	    case binary:split(Data, <<"\t">>, [global]) of
+		[Codes,Coord,TZ | _Comments] ->
+		    case match_tz(TimeZone, string:trim(binary_to_list(TZ))) of
+			true ->
+			    {ok, {binary:split(Codes, <<"\t">>, [global]),
+				  coord_to_lat_long(Coord),TZ}};
+			false ->
+			    location_from_zone_fd(Fd, TimeZone)
+		    end;
+		_ ->
+		    location_from_zone_fd(Fd, TimeZone)
+	    end;
+	eof ->
+	    {error,not_found}
+    end.
+
+match_tz(TZ, TZ) ->
+    true;
+match_tz(TZ1, TZ2) ->
+    case {string:to_lower(TZ1),string:to_lower(TZ2)} of
+	{TZ,TZ} -> true;
+	{TZ1L,TZ2L} ->
+	    case string:tokens(TZ2L, "/") of
+		[_, TZ1L] -> true;
+		_ -> false
+	    end
+    end.
+
+coord_to_lat_long(<<S1,D11,D12,M11,M12,
+		    S2,D21,D22,D23,M21,M22>>) when 
+      (S1 =:= $+ orelse S1 =:= $-),
+      (S2 =:= $+ orelse S2 =:= $-) ->
+    Lat = latitude_to_deg({list_to_integer([D11,D12]),
+			   list_to_integer([M11,M12]),0,S1}),
+    Long = longitude_to_deg({list_to_integer([D21,D22,D23]),
+			     list_to_integer([M21,M22]),0,S2}),
+    {Lat,Long};
+coord_to_lat_long(<<S1,D11,D12,M11,M12,S11,S12,
+		    S2,D21,D22,D23,M21,M22,S21,S22>>) ->
+    Lat = latitude_to_deg({list_to_integer([D11,D12]),
+			   list_to_integer([M11,M12]),
+			   list_to_integer([S11,S12]),S1}),
+    Long = longitude_to_deg({list_to_integer([D21,D22,D23]),
+			     list_to_integer([M21,M22]),
+			     list_to_integer([S21,S22]),S2}),
+    {Lat,Long}.
+
+%% 0 = east, 1 = west, convert longitude to degree (0..
+longitude_to_deg({Deg,Min,Sec,W}) when 
+      W =:= 1; W =:= $W; W =:= $- ->  %% West = 1
+    -deg_to_decimal(Deg,Min,Sec);
+longitude_to_deg({Deg,Min,Sec,W}) 
+  when W =:= 0; W =:= $E; W =:= $+ ->  %% East = 0
+    deg_to_decimal(Deg,Min,Sec);
+longitude_to_deg(Deg) when is_number(Deg) ->
+    Deg.
+
+latitude_to_deg({Deg,Min,Sec,S}) 
+  when S =:= 1; S =:= $S; S =:= $- ->  %% South = 1
+    -deg_to_decimal(Deg,Min,Sec);
+latitude_to_deg({Deg,Min,Sec,S}) 
+  when S =:= 0; S =:= $N; S =:= $+ ->  %% North = 0
+    deg_to_decimal(Deg,Min,Sec);
+latitude_to_deg(Deg) when is_number(Deg) ->
+    Deg.
+
+-ifdef(not_used).
+deg_to_decimal({Deg,Min,Sec}) ->
+    deg_to_decimal(Deg,Min,Sec);
+deg_to_decimal(Degree) when is_number(Degree) ->
+    Degree.
+-endif.
+
+deg_to_decimal(Deg,Min,Sec) ->
+    Deg + Min/60 + Sec/(60*60).
+
 %% Compute the number of days between two dates
 days_diff(Date1, Date2) ->
     calendar:date_to_gregorian_days(Date2) - calendar:date_to_gregorian_days(Date1).
@@ -271,7 +455,7 @@ test() ->
     test(32.755701, -96.797296, -5.0, {7, 26, 34}, {19, 41, 07}).  %% Dallas - USA
 
 test(Latitude, Longitude, UtcOffset, Sunrise, Sunset) ->
-    case get_time(Latitude,Longitude,UtcOffset,{2017,3,23}) of
+    case get_rise_set(Latitude,Longitude,UtcOffset,{2017,3,23}) of
 	{ok,{Sunrise1,Sunset1}} ->
 	    Diff1 = abs_time_diff(Sunrise1, Sunrise),
 	    Diff2 = abs_time_diff(Sunset1, Sunset),
@@ -311,5 +495,5 @@ benchmark(N,Latitude,Longitude,UtcOffset,Date) ->
 bench_loop(0,_Latitude,_Longitude,_UtcOffset,_Date) ->
     ok;
 bench_loop(I,Latitude,Longitude,UtcOffset,Date) ->
-    get_time(Latitude,Longitude,UtcOffset,Date),
+    get_rise_set(Latitude,Longitude,UtcOffset,Date),
     bench_loop(I-1,Latitude,Longitude,UtcOffset,Date).

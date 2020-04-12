@@ -1,0 +1,13 @@
+{application, xcal,
+ [
+  {description, "Calendar event message sender"},
+  {vsn, git},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib,
+		  erlcron,
+		  xbus
+                 ]},
+  {env, []}
+ ]}.
