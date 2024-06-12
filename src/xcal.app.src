@@ -1,13 +1,9 @@
-{application, xcal,
- [
-  {description, "Calendar event message sender"},
+{application, App,
+ [{description, "Calendar event message sender"},
   {vsn, git},
-  {registered, []},
-  {applications, [
-                  kernel,
-                  stdlib,
-		  erlcron,
-		  xbus
-                 ]},
-  {env, []}
- ]}.
+  {modules, ["@@MODULES@@"]},
+%%  {mod, {App_app, []}},
+%%  {registered, [App_srv]},
+  {env, []},
+  {applications,[kernel,stdlib,erlcron,xbus]}
+  ]}.

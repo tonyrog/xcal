@@ -15,6 +15,8 @@
 -export([get_timezone/0]).
 -export([benchmark/0]).
 -export([test/0, test/5]).
+-export([location_from_zone_tab/1]).
+-export([utc_offset_from_name/1]).
 
 -compile(inline).
 -compile({inline_size,100}).
@@ -40,7 +42,8 @@ sqr(X) -> X*X.
 %% bench: 10.35 (2020-04-12 00:03)
 %% bench: 10.60 (2020-04-12 00:27)
 %% bench: 11.16 (2020-04-12 01:26)
-
+%% bench: 14.40 (2021-12-26 17:01)
+%% 
 %% sunrisesunset is used to calculate the apparent sunrise and sunset 
 %% based on the latitude, longitude, UTC offset and date.
 %% All calculations (formulas) were extracted from the 
@@ -75,7 +78,7 @@ get_rise_set(Latitude, Longitude, UtcOffset, Date={Year,_Month,_Day}) when
     end.
 
 %% I guess second accuracy is a bit over kill just to find
-%% out when sun is settings, bit who knows?
+%% out when sun is settings, but who knows?
 get_rise_set_(Latitude, Longitude, UtcOffset, Date) ->
     NumDays = days_diff({1899,12,30}, Date),
     {SunriseSeconds,SunsetSeconds} = 
@@ -87,9 +90,9 @@ get_rise_set_(Latitude, Longitude, UtcOffset, Date) ->
     {ok,{Sunrise, Sunset}}.
 
 get_rise_set__(Latitude, Longitude, UtcOffset, NumDays, 
-	   Second, SecondMax,
-	   Sunrise, SunriseMin,
-	   Sunset, SunsetMin) when Second < SecondMax ->
+	       Second, SecondMax,
+	       Sunrise, SunriseMin,
+	       Sunset, SunsetMin) when Second < SecondMax ->
     SecondNorm = Second / (?SECONDS_PER_DAY-1),
     case get_solar_noon(Latitude,Longitude,UtcOffset,NumDays,SecondNorm) of
 	{_SolarNoon,undefined} ->
@@ -289,12 +292,14 @@ get_location() ->
     case application:get_env(?APP, location) of
 	undefined ->
 	    get_location_linux();
-	{ok,{Long,Lat}} ->
+	{ok,{Lat,Long,Tz}} ->
+	    {Lat,Long,Tz};
+	{ok,{Lat,Long}} ->
 	    case application:get_env(?APP, timezone) of
 		undefined -> 
-		    {Long,Lat,0};
+		    {Lat,Long,0};
 		{ok,Tz} ->
-		    {Long,Lat,Tz}
+		    {Lat,Long,Tz}
 	    end
     end.
 
@@ -307,6 +312,62 @@ get_location_linux() ->
 		{ok,{_CountryCodes,{Latitude,Longitude},_TZ}} ->
 		    {Latitude, Longitude, Offs / ?SECONDS_PER_HOUR}
 	    end
+    end.
+
+utc_offset_from_name(Name) ->
+    case file:open(filename:join(code:priv_dir(?APP),"zonew10.tab"),
+		   [raw,read,binary]) of
+	{ok,Fd} ->
+	    Name1 = string:lowercase(iolist_to_binary(Name)),
+	    try utc_offset_from_name_(Fd,Name1) of
+		Offset -> Offset
+	    after
+		file:close(Fd)
+	    end;
+	Error ->
+	    Error
+    end.
+
+utc_offset_from_name_(Fd, Name) ->
+    case file:read_line(Fd) of
+	{ok,<<$#,_/binary>>} ->
+	    utc_offset_from_name_(Fd, Name);
+	{ok,<<"(UTC",S,H1,H2,$:,M1,M2,")", Data1/binary>>} ->
+		case binary:split(Data1, <<"\t">>) of
+		    [Data2|_] ->
+			Names =
+			    [string:trim(Str) ||
+				Str <-binary:split(Data2, <<",">>, [global])],
+			case match_name(Name, Names) of
+			    true -> 
+				{ok,utc_tz_to_min(S,H1,H2,M1,M2)};
+			    false ->
+				utc_offset_from_name_(Fd, Name)
+			end;
+		    [] ->
+			utc_offset_from_name_(Fd, Name)
+		end;
+	{ok, _} ->
+	    utc_offset_from_name_(Fd, Name);
+	eof ->
+	    {error,not_found}
+    end.
+
+match_name(Name, [A | As]) ->
+    case string:lowercase(A) of
+	Name -> true;
+	_ -> match_name(Name, As)
+    end;
+match_name(_Name, []) ->
+    false.
+
+%% convert ascii H1H2:M1M2 into hours (float)
+utc_tz_to_min(S,H1,H2,M1,M2) ->
+    Hour = 10*(H1-$0) + (H2-$0),
+    Min  = 10*(M1-$0) + (M2-$0),
+    H =Hour + Min/60,
+    if S =:= $- -> -H;
+       S =:= $+ -> H
     end.
 
 %% Get time zone, fixme: use windows "tzutil /g"
@@ -387,7 +448,7 @@ location_from_zone_fd(Fd, TimeZone) ->
 match_tz(TZ, TZ) ->
     true;
 match_tz(TZ1, TZ2) ->
-    case {string:to_lower(TZ1),string:to_lower(TZ2)} of
+    case {string:lowercase(TZ1),string:lowercase(TZ2)} of
 	{TZ,TZ} -> true;
 	{TZ1L,TZ2L} ->
 	    case string:tokens(TZ2L, "/") of
@@ -482,8 +543,9 @@ benchmark() ->
     benchmark(100).
 
 benchmark(N) ->
-    {Latitude, Longitude, UtcOffset} = eplanet:location(),    
-    benchmark(N,Latitude,Longitude,UtcOffset,date()).
+    Latitude = 59.3, Longitude = 18.05, UtcOffset = 1.0,
+    Date = {2020, 04, 11},
+    benchmark(N,Latitude,Longitude,UtcOffset,Date).
 
 benchmark(N,Latitude,Longitude,UtcOffset,Date) ->
     T0 = erlang:monotonic_time(),
